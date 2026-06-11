@@ -1,0 +1,18 @@
+# Environment variables
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Firebase
+*.json
+!firestore.rules
+!firestore.indexes.json

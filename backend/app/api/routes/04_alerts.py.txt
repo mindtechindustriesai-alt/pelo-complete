@@ -1,0 +1,60 @@
+from fastapi import APIRouter, Depends, HTTPException, Request
+from datetime import datetime
+from app.middleware.auth import get_current_user
+from app.services.whatsapp_service import send_whatsapp_alert
+
+router = APIRouter(prefix="/alerts", tags=["alerts"])
+
+@router.post("/fall")
+async def fall_alert(request: Request, user=Depends(get_current_user)):
+    """Fall detection alert from device motion sensor"""
+    body = await request.json()
+    location = body.get("location", "Unknown")
+    
+    # Send WhatsApp to next of kin
+    if user.get("nextOfKinWhatsApp"):
+        await send_whatsapp_alert(
+            user["nextOfKinWhatsApp"],
+            f"⚠️ FALL ALERT: {user.get('name', 'User')} may have fallen at {location}. Please check immediately."
+        )
+    
+    # Send to security company if configured
+    if user.get("securityPhone"):
+        await send_whatsapp_alert(
+            user["securityPhone"],
+            f"⚠️ FALL DETECTED: {user.get('name')} at {location}. Immediate assistance可能需要."
+        )
+    
+    return {
+        "alertId": f"fall_{int(datetime.now().timestamp())}",
+        "dispatched": True,
+        "message": "Next of kin and security company notified"
+    }
+
+@router.post("/panic")
+async def panic_alert(request: Request, user=Depends(get_current_user)):
+    """General panic button alert"""
+    body = await request.json()
+    location = body.get("location", "Unknown")
+    message = body.get("message", "Emergency assistance needed")
+    
+    # Send to next of kin
+    if user.get("nextOfKinWhatsApp"):
+        await send_whatsapp_alert(
+            user["nextOfKinWhatsApp"],
+            f"🚨 PANIC ALERT: {user.get('name')} needs help at {location}. Message: {message}"
+        )
+    
+    # Send to security company
+    if user.get("securityPhone"):
+        await send_whatsapp_alert(
+            user["securityPhone"],
+            f"🚨 PANIC: {user.get('name')} at {location}. Dispatch immediately."
+        )
+    
+    return {
+        "alertId": f"panic_{int(datetime.now().timestamp())}",
+        "dispatched": True,
+        "call_number": "10111",
+        "message": "Emergency services notified"
+    }

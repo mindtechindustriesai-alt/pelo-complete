@@ -1,0 +1,27 @@
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+from app.middleware.auth import get_current_user
+
+router = APIRouter(prefix="/payments", tags=["payments"])
+
+class SubscriptionCreate(BaseModel):
+    tier: str  # "standard" (R49) or "needy" (R19)
+
+@router.post("/create-subscription")
+async def create_subscription(sub: SubscriptionCreate, user=Depends(get_current_user)):
+    """Create Stripe checkout session"""
+    # Mock implementation — integrate Stripe in production
+    price = 49 if sub.tier == "standard" else 19
+    return {
+        "clientSecret": "mock_client_secret",
+        "tier": sub.tier,
+        "price": price,
+        "currency": "ZAR"
+    }
+
+@router.post("/webhook")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhook events"""
+    body = await request.json()
+    # Process subscription update
+    return {"received": True}

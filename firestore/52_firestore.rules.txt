@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    match /incidents/{incident} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+    }
+    match /guardians/{guardian} {
+      allow read: if request.auth != null;
+      allow update: if request.auth != null && request.auth.token.isGuardian == true;
+    }
+    match /alerts/{alert} {
+      allow read, create: if request.auth != null;
+    }
+    match /chat_messages/{message} {
+      allow read, create: if request.auth != null;
+    }
+    match /reports/{report} {
+      allow read, create: if request.auth != null;
+    }
+    match /payments/{payment} {
+      allow read, create: if request.auth != null;
+    }
+  }
+}

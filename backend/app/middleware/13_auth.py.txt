@@ -1,0 +1,170 @@
+# ============================================================
+# AUTH MIDDLEWARE - JWT Verification & User Extraction
+# For PELO Backend
+# ============================================================
+
+import os
+import jwt
+from fastapi import HTTPException, Depends, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from datetime import datetime
+from typing import Optional, Dict
+
+# Load JWT secret from environment
+JWT_SECRET = os.getenv("JWT_SECRET", "change-this-secret-in-production")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_DAYS = 30
+
+# Security scheme
+security = HTTPBearer(auto_error=False)
+
+
+def create_token(user_id: str, name: str, email: str, tier: str = "standard") -> str:
+    """
+    Create JWT token for authenticated user.
+    
+    Args:
+        user_id: Unique user identifier
+        name: User's full name
+        email: User's email address
+        tier: Subscription tier ("standard" or "needy")
+    
+    Returns:
+        JWT token string
+    """
+    payload = {
+        "sub": user_id,
+        "name": name,
+        "email": email,
+        "tier": tier,
+        "exp": datetime.utcnow() + timedelta(days=JWT_EXPIRY_DAYS),
+        "iat": datetime.utcnow()
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def verify_token(token: str) -> Optional[Dict]:
+    """
+    Verify JWT token and return payload.
+    
+    Args:
+        token: JWT token string
+    
+    Returns:
+        Decoded payload dict if valid, None if invalid
+    """
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> Dict:
+    """
+    FastAPI dependency to extract current user from JWT token.
+    
+    Usage:
+        @app.get("/protected")
+        async def protected_route(user = Depends(get_current_user)):
+            return {"user_id": user["userId"], "name": user["name"]}
+    
+    Returns:
+        Dict with user information
+    
+    Raises:
+        HTTPException 401 if token missing, invalid, or expired
+    """
+    if not credentials:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    token = credentials.credentials
+    payload = verify_token(token)
+    
+    if not payload:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Extract user information from payload
+    user = {
+        "userId": payload.get("sub"),
+        "name": payload.get("name"),
+        "email": payload.get("email"),
+        "tier": payload.get("tier", "standard")
+    }
+    
+    return user
+
+
+async def get_current_user_optional(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+) -> Optional[Dict]:
+    """
+    Optional auth dependency - returns None if no valid token.
+    Used for endpoints that allow anonymous access.
+    """
+    if not credentials:
+        return None
+    
+    token = credentials.credentials
+    payload = verify_token(token)
+    
+    if not payload:
+        return None
+    
+    return {
+        "userId": payload.get("sub"),
+        "name": payload.get("name"),
+        "email": payload.get("email"),
+        "tier": payload.get("tier", "standard")
+    }
+
+
+class AuthMiddleware:
+    """
+    Optional middleware to log authentication attempts.
+    Add to app if needed:
+        app.add_middleware(AuthMiddleware)
+    """
+    
+    async def __call__(self, request: Request, call_next):
+        # Skip auth check for public endpoints
+        public_paths = ["/", "/health", "/api/auth/register", "/api/auth/login", "/api/quantum/status", "/docs", "/openapi.json", "/redoc"]
+        
+        if request.url.path in public_paths:
+            return await call_next(request)
+        
+        # For protected paths, token will be validated by get_current_user dependency
+        # This middleware just logs
+        auth_header = request.headers.get("Authorization")
+        if auth_header:
+            print(f"[AUTH] Request to {request.url.path} - Token present")
+        else:
+            print(f"[AUTH] Request to {request.url.path} - No token (will fail if protected)")
+        
+        return await call_next(request)
+
+
+# Helper function to extract user from request (for WebSocket or non-FastAPI contexts)
+def extract_user_from_token(token: str) -> Optional[Dict]:
+    """Extract user from token without FastAPI dependency."""
+    payload = verify_token(token)
+    if not payload:
+        return None
+    return {
+        "userId": payload.get("sub"),
+        "name": payload.get("name"),
+        "email": payload.get("email"),
+        "tier": payload.get("tier", "standard")
+    }

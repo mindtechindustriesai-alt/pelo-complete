@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: pelo-backend
+    runtime: python
+    repo: https://github.com/yourusername/pelo-backend
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: https://pelo.netlify.app,https://pelo-backend.onrender.com
+      - key: GBV_HELPLINE
+        value: 0800150150
+      - key: GBV_SILENT_CALLBACK
+        value: 0800428428
+      - key: CHILDLINE_NUMBER
+        value: 0800055555
+      - key: SAPS_EMERGENCY
+        value: 10111

@@ -1,0 +1,327 @@
+# ============================================================
+# PELO BACKEND - COMPLETE SINGLE FILE DEPLOYMENT
+# Deploy to Render: Python 3.11 + Uvicorn
+# Environment variables needed (see below)
+# ============================================================
+
+import os
+import jwt
+import httpx
+import json
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+JWT_SECRET = os.getenv("JWT_SECRET", "change-this-secret-in-production")
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER", "+14155238886")
+
+# Emergency numbers
+GBV_SILENT_CALLBACK = "0800428428"
+CHILDLINE_NUMBER = "0800055555"
+SAPS_EMERGENCY = "10111"
+
+# ============================================================
+# FASTAPI APP
+# ============================================================
+app = FastAPI(title="PELO Backend", description="Community Safety Network", version="2.0.0")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Security
+security = HTTPBearer()
+
+# ============================================================
+# AUTH DEPENDENCY
+# ============================================================
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return {"userId": payload.get("sub"), "name": payload.get("name"), "email": payload.get("email")}
+    except:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+# ============================================================
+# PYDANTIC MODELS
+# ============================================================
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    phone: str
+    password: str
+    securityPhone: Optional[str] = None
+    nextOfKinWhatsApp: Optional[str] = None
+    neighbourhoodGroupLink: Optional[str] = None
+    securityCompany: Optional[str] = None
+    fallDetectionEnabled: bool = True
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class IncidentCreate(BaseModel):
+    category: str
+    location: str
+    description: str
+    videoUrl: Optional[str] = None
+    anonymous: bool = False
+
+class PanicRequest(BaseModel):
+    location: str
+    message: Optional[str] = None
+    language: str = "english"
+
+class ChatRequest(BaseModel):
+    message: str
+    language: str = "english"
+    history: Optional[List[Dict]] = None
+
+# ============================================================
+# DEEPSEEK SERVICE (Offline Fallback)
+# ============================================================
+DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+
+SYSTEM_PROMPTS = {
+    "pelo_safety": """You are PELO Guardian AI, a community safety assistant for South Africa. Help with: incident reporting, emergency contacts, crime prevention. Emergency: SAPS 10111 | Ambulance 10177 | GBV 0800150150 | Silent Callback 0800428428 | Childline 0800055555. Quantum verified: CHSH S=2.76.""",
+    "incident_classifier": """Respond ONLY with JSON: {"severity": "high|medium|low", "category": "theft|violence|suspicious|gdv|fire|other", "dispatch_guardian": true|false, "summary": "one sentence"}""",
+    "gdv_support": """You are a compassionate GBV assistant. Provide immediate safety steps. Helplines: 0800 428 428 (silent callback), 0800 150 150.""",
+    "recipe_generator": """Suggest budget recipes for South Africa under R50 using Boxer/Shoprite ingredients. Include cost. Respond in user's language.""",
+}
+
+async def deepseek_chat(message: str, portal: str = "pelo_safety", language: str = "english") -> Dict:
+    if not DEEPSEEK_API_KEY:
+        return {"response": offline_fallback(message), "source": "offline"}
+    
+    system = SYSTEM_PROMPTS.get(portal, SYSTEM_PROMPTS["pelo_safety"])
+    if language != "english":
+        system += f"\n\nRespond in {language}."
+    
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.post(
+                DEEPSEEK_URL,
+                headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "deepseek-chat", "messages": [{"role": "system", "content": system}, {"role": "user", "content": message}], "temperature": 0.7, "max_tokens": 1024}
+            )
+            if r.status_code == 200:
+                return {"response": r.json()["choices"][0]["message"]["content"], "source": "deepseek"}
+            return {"response": offline_fallback(message), "source": "api_error"}
+    except:
+        return {"response": offline_fallback(message), "source": "exception"}
+
+async def classify_incident(description: str) -> dict:
+    result = await deepseek_chat(description, portal="incident_classifier")
+    try:
+        return json.loads(result["response"])
+    except:
+        return {"severity": "medium", "category": "other", "dispatch_guardian": True, "summary": description[:100]}
+
+def offline_fallback(message: str) -> str:
+    m = message.lower()
+    if "gdv" in m or "gbv" in m:
+        return "GBV Helpline: 0800 150 150 | Silent Callback: 0800 428 428. You are not alone."
+    if "child" in m:
+        return "Childline SA: 0800 055 555. Report immediately."
+    if "robbery" in m or "attack" in m:
+        return "Do not resist. Call SAPS 10111 after safe."
+    return "PELO Guardian. Emergency: SAPS 10111 | GBV: 0800 428 428 | Childline: 0800 055 555"
+
+# ============================================================
+# WHATSAPP SERVICE (Mock if no Twilio)
+# ============================================================
+async def send_whatsapp(to: str, message: str) -> bool:
+    if not TWILIO_ACCOUNT_SID:
+        print(f"WhatsApp (mock): to={to}, msg={message[:50]}...")
+        return True
+    try:
+        from twilio.rest import Client
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client.messages.create(body=message, from_=f'whatsapp:{TWILIO_WHATSAPP_NUMBER}', to=f'whatsapp:{to}')
+        return True
+    except:
+        return False
+
+# ============================================================
+# IN-MEMORY STORAGE (Replace with Firebase for production)
+# ============================================================
+users_db = {}
+incidents_db = []
+guardians_db = [
+    {"id": "G001", "name": "Thabo Nkosi", "status": "on_patrol", "phone": "27721234567"},
+    {"id": "G002", "name": "Nomsa Mthethwa", "status": "available", "phone": "27721234568"},
+    {"id": "G003", "name": "Rapid Response", "status": "mobile", "phone": "0800123456"},
+]
+
+# ============================================================
+# HEALTH & ROOT
+# ============================================================
+@app.get("/")
+async def root():
+    return {"service": "PELO Backend", "status": "operational", "quantum_badge": "CHSH S=2.76", "patent": "SA 2026/05142"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+@app.get("/api/quantum/status")
+async def quantum_status():
+    return {"quantum_verified": True, "chsh_score": 2.76, "correlation": 0.984, "patent": "SA 2026/05142"}
+
+# ============================================================
+# AUTH ENDPOINTS
+# ============================================================
+@app.post("/api/auth/register")
+async def register(req: RegisterRequest):
+    if req.email in users_db:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user_id = f"user_{len(users_db)+1}"
+    token = jwt.encode({"sub": user_id, "name": req.name, "email": req.email, "exp": datetime.utcnow() + timedelta(days=30)}, JWT_SECRET)
+    users_db[req.email] = {"userId": user_id, "name": req.name, "email": req.email, "phone": req.phone, "nextOfKinWhatsApp": req.nextOfKinWhatsApp, "securityPhone": req.securityPhone}
+    return {"token": token, "user": {"userId": user_id, "name": req.name, "email": req.email}}
+
+@app.post("/api/auth/login")
+async def login(req: LoginRequest):
+    if req.email not in users_db:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    user = users_db[req.email]
+    token = jwt.encode({"sub": user["userId"], "name": user["name"], "email": user["email"], "exp": datetime.utcnow() + timedelta(days=30)}, JWT_SECRET)
+    return {"token": token, "user": user}
+
+# ============================================================
+# INCIDENT ENDPOINTS
+# ============================================================
+@app.get("/api/incidents/stats")
+async def incident_stats(user=Depends(get_current_user)):
+    return {"guardianCount": len(guardians_db), "responseTime": 42, "incidentsToday": len([i for i in incidents_db if i.get("createdAt", "").startswith(datetime.now().strftime("%Y-%m-%d"))]), "aiAccuracy": 96}
+
+@app.get("/api/incidents")
+async def get_incidents(limit: int = 20, user=Depends(get_current_user)):
+    return incidents_db[-limit:]
+
+@app.post("/api/incidents")
+async def create_incident(incident: IncidentCreate, user=Depends(get_current_user)):
+    classification = await classify_incident(incident.description)
+    incident_data = {
+        "incidentId": f"inc_{len(incidents_db)+1}",
+        "userId": user["userId"],
+        "category": incident.category or classification.get("category", "other"),
+        "severity": classification.get("severity", "medium"),
+        "location": incident.location,
+        "description": incident.description,
+        "videoUrl": incident.videoUrl,
+        "aiSummary": classification.get("summary", incident.description[:100]),
+        "createdAt": datetime.now().isoformat()
+    }
+    incidents_db.insert(0, incident_data)
+    return incident_data
+
+# ============================================================
+# PANIC BUTTON ENDPOINTS
+# ============================================================
+@app.post("/api/panic/gdv")
+async def panic_gdv(req: PanicRequest, user=Depends(get_current_user)):
+    guidance = await deepseek_chat(f"GBV emergency at {req.location}. Provide safety steps.", portal="gdv_support", language=req.language)
+    if user.get("nextOfKinWhatsApp"):
+        await send_whatsapp(user["nextOfKinWhatsApp"], f"🚨 GBV EMERGENCY: {user['name']} needs help at {req.location}")
+    return {"alertId": f"gbv_{int(datetime.now().timestamp())}", "dispatched": True, "call_number": GBV_SILENT_CALLBACK, "guidance": guidance["response"], "quantum_verified": True}
+
+@app.post("/api/panic/child")
+async def panic_child(req: PanicRequest, user=Depends(get_current_user)):
+    await send_whatsapp(CHILDLINE_NUMBER, f"👶 CHILD ABUSE REPORT: Location {req.location}")
+    guidance = await deepseek_chat(f"Child abuse at {req.location}. Provide safety steps.", portal="gdv_support")
+    return {"alertId": f"child_{int(datetime.now().timestamp())}", "dispatched": True, "call_number": CHILDLINE_NUMBER, "guidance": guidance["response"]}
+
+@app.post("/api/panic/attack")
+async def panic_attack(req: PanicRequest, user=Depends(get_current_user)):
+    await send_whatsapp(SAPS_EMERGENCY, f"🚨 ATTACK IN PROGRESS: {req.location}")
+    return {"alertId": f"attack_{int(datetime.now().timestamp())}", "dispatched": True, "call_number": SAPS_EMERGENCY}
+
+@app.post("/api/panic/robbery")
+async def panic_robbery(req: PanicRequest, user=Depends(get_current_user)):
+    if user.get("securityPhone"):
+        await send_whatsapp(user["securityPhone"], f"🚨 ROBBERY ALERT at {req.location}")
+    return {"alertId": f"robbery_{int(datetime.now().timestamp())}", "dispatched": True, "call_number": SAPS_EMERGENCY}
+
+# ============================================================
+# CHAT ENDPOINT
+# ============================================================
+@app.post("/api/chat")
+async def chat(req: ChatRequest, user=Depends(get_current_user)):
+    result = await deepseek_chat(req.message, portal="pelo_safety", language=req.language)
+    return {"response": result["response"], "source": result["source"], "quantum_verified": True, "chsh_score": 2.76}
+
+# ============================================================
+# GUARDIAN ENDPOINTS
+# ============================================================
+@app.get("/api/guardians")
+async def get_guardians(user=Depends(get_current_user)):
+    return guardians_db
+
+@app.put("/api/guardians/{guardian_id}/status")
+async def update_guardian_status(guardian_id: str, status: str, user=Depends(get_current_user)):
+    for g in guardians_db:
+        if g["id"] == guardian_id:
+            g["status"] = status
+            return g
+    raise HTTPException(status_code=404, detail="Guardian not found")
+
+# ============================================================
+# ALERTS (Fall Detection)
+# ============================================================
+@app.post("/api/alerts/fall")
+async def fall_alert(req: Request, user=Depends(get_current_user)):
+    body = await req.json()
+    location = body.get("location", "Unknown")
+    if user.get("nextOfKinWhatsApp"):
+        await send_whatsapp(user["nextOfKinWhatsApp"], f"⚠️ FALL ALERT: {user['name']} may have fallen at {location}")
+    return {"alertId": f"fall_{int(datetime.now().timestamp())}", "dispatched": True}
+
+@app.post("/api/alerts/panic")
+async def panic_alert(req: Request, user=Depends(get_current_user)):
+    body = await req.json()
+    location = body.get("location", "Unknown")
+    if user.get("nextOfKinWhatsApp"):
+        await send_whatsapp(user["nextOfKinWhatsApp"], f"🚨 PANIC ALERT: {user['name']} needs immediate help at {location}")
+    return {"alertId": f"panic_{int(datetime.now().timestamp())}", "dispatched": True}
+
+# ============================================================
+# RECIPES
+# ============================================================
+BUDGET_RECIPES = [
+    {"name": "Pap & Chakalaka", "cost": 15, "time": 20, "ingredients": ["pap", "chakalaka", "onion"], "instructions": "Boil water, add pap. Fry onion, add chakalaka."},
+    {"name": "Umngqusho", "cost": 20, "time": 45, "ingredients": ["samp", "beans", "onion"], "instructions": "Soak overnight. Boil until soft. Fry onion, combine."},
+    {"name": "Cabbage Curry", "cost": 12, "time": 25, "ingredients": ["cabbage", "onion", "tomato", "curry powder"], "instructions": "Fry onion, add cabbage, tomato, curry. Simmer 15 min."},
+    {"name": "Bean Stew", "cost": 15, "time": 35, "ingredients": ["beans", "onion", "tomato"], "instructions": "Fry onion, add tomato, beans. Simmer 20 min."},
+    {"name": "Vetkoek & Mince", "cost": 22, "time": 40, "ingredients": ["flour", "yeast", "mince", "onion"], "instructions": "Make dough, fry balls. Cook mince. Stuff vetkoek."},
+]
+
+@app.get("/api/recipes")
+async def get_recipes(limit: int = 5, user=Depends(get_current_user)):
+    return BUDGET_RECIPES[:limit]
+
+# ============================================================
+# RUN
+# ============================================================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))

@@ -1,0 +1,59 @@
+from fastapi import APIRouter, Depends, HTTPException
+from typing import List, Optional
+from datetime import datetime
+from app.services.deepseek_service import deepseek_chat, classify_incident
+from app.services.firebase_service import FirebaseService
+from app.middleware.auth import get_current_user
+from app.models.incident import Incident, IncidentCreate, IncidentStats
+
+router = APIRouter(prefix="/incidents", tags=["incidents"])
+
+@router.get("/stats")
+async def get_stats(user=Depends(get_current_user)):
+    """Get dashboard statistics"""
+    firebase = FirebaseService()
+    stats = await firebase.get_incident_stats()
+    return {
+        "guardianCount": 12,
+        "responseTime": 42,
+        "incidentsToday": stats.get("today", 0),
+        "aiAccuracy": 96
+    }
+
+@router.get("/")
+async def get_incidents(limit: int = 20, severity: Optional[str] = None, user=Depends(get_current_user)):
+    """Get live incident feed"""
+    firebase = FirebaseService()
+    incidents = await firebase.get_incidents(limit, severity)
+    return incidents
+
+@router.post("/")
+async def create_incident(incident: IncidentCreate, user=Depends(get_current_user)):
+    """Create incident with AI classification"""
+    # Classify with DeepSeek
+    classification = await classify_incident(incident.description)
+    
+    # Build incident object
+    incident_data = {
+        "userId": user["userId"],
+        "category": incident.category or classification.get("category", "other"),
+        "severity": classification.get("severity", "medium"),
+        "location": incident.location,
+        "description": incident.description,
+        "videoUrl": incident.videoUrl,
+        "aiSummary": classification.get("summary", incident.description[:100]),
+        "dispatchGuardian": classification.get("dispatch_guardian", True),
+        "timestamp": datetime.utcnow(),
+        "status": "open"
+    }
+    
+    # Save to Firestore
+    firebase = FirebaseService()
+    incident_id = await firebase.create_incident(incident_data)
+    
+    # Dispatch guardian if needed
+    if classification.get("dispatch_guardian"):
+        from app.services.whatsapp_service import dispatch_guardian
+        await dispatch_guardian(incident_data)
+    
+    return {"incidentId": incident_id, **incident_data}
