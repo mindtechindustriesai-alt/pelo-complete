@@ -1,9 +1,3 @@
-# ============================================================
-# PELO BACKEND - COMPLETE SINGLE FILE DEPLOYMENT
-# Deploy to Render: Python 3.11 + Uvicorn
-# Environment variables needed (see below)
-# ============================================================
-
 import os
 import jwt
 import httpx
@@ -16,7 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 # ============================================================
@@ -28,7 +21,6 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER", "+14155238886")
 
-# Emergency numbers
 GBV_SILENT_CALLBACK = "0800428428"
 CHILDLINE_NUMBER = "0800055555"
 SAPS_EMERGENCY = "10111"
@@ -47,7 +39,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Security
 security = HTTPBearer()
 
 # ============================================================
@@ -319,10 +310,6 @@ BUDGET_RECIPES = [
 async def get_recipes(limit: int = 5, user=Depends(get_current_user)):
     return BUDGET_RECIPES[:limit]
 
-# ============================================================
-# RUN
-# ============================================================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-EOF
