@@ -5,10 +5,11 @@ Patent: SA 2026/05142
 """
 
 import os
+import hashlib
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import uvicorn
 
 # ============================================================
@@ -33,7 +34,7 @@ QUANTUM_BADGE = {
 app = FastAPI(
     title="PELO — Community Safety & Waste Management",
     description="Quantum-verified safety and waste intelligence platform",
-    version="1.0.0",
+    version="1.0.1",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -49,13 +50,19 @@ app.add_middleware(
 )
 
 # ============================================================
+# DATA MODELS
+# ============================================================
+class CertificateRequest(BaseModel):
+    certificate_hash: str
+
+# ============================================================
 # ROOT & HEALTH
 # ============================================================
 @app.get("/")
 async def root():
     return {
         "service": "PELO",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "status": "operational",
         "quantum_badge": QUANTUM_BADGE["text"],
         "patent": QUANTUM_BADGE["patent"],
@@ -64,6 +71,7 @@ async def root():
             "/health",
             "/api/quantum/status",
             "/api/v1/verify/chsh",
+            "/api/v1/attest/certificate",
             "/api/v1/apps/pelo/status"
         ]
     }
@@ -99,6 +107,44 @@ async def verify_chsh():
     }
 
 # ============================================================
+# DYNAMIC CERTIFICATE ATTESTATION (THE FIX)
+# ============================================================
+@app.post("/api/v1/attest/certificate")
+async def attest_certificate(request: CertificateRequest):
+    """
+    Binds a specific certificate hash to the immutable IBM Kingston quantum proof.
+    Solves the static endpoint flaw by requiring the hash as input.
+    """
+    cert_hash = request.certificate_hash
+    
+    # Validate hash format (SHA-256 is 64 characters)
+    if len(cert_hash) != 64:
+        raise HTTPException(status_code=400, detail="Invalid SHA-256 hash format. Must be 64 characters.")
+    
+    # The immutable quantum anchor data
+    ibm_job_id = QUANTUM_BADGE["ibm_job_id"]
+    chsh_s = QUANTUM_BADGE["chsh_s"]
+    
+    # Create the binding signature
+    # In production, this should use an asymmetric private key (e.g., RSA or ECDSA) to sign the payload.
+    # For now, we use a deterministic SHA-256 binding.
+    binding_string = f"{cert_hash}-{ibm_job_id}-{chsh_s}-{QUANTUM_BADGE['patent']}"
+    attestation_signature = hashlib.sha256(binding_string.encode()).hexdigest()
+    
+    return {
+        "status": "success",
+        "certificate_hash": cert_hash,
+        "quantum_anchor": {
+            "chsh_s": chsh_s,
+            "ibm_job_id": ibm_job_id,
+            "hardware": "IBM Kingston (156-qubit)"
+        },
+        "attestation_signature": attestation_signature,
+        "patent": QUANTUM_BADGE["patent"],
+        "timestamp": datetime.now().isoformat()
+    }
+
+# ============================================================
 # MQOS APP STATUS — HEALTH CHECK FOR DASHBOARD
 # ============================================================
 @app.get("/api/v1/apps/pelo/status")
@@ -109,7 +155,7 @@ async def app_status():
     return {
         "app": "pelo",
         "status": "operational",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "quantum_badge": f"CHSH S={QUANTUM_BADGE['chsh_s']:.2f}",
         "patent": QUANTUM_BADGE["patent"],
         "ibm_job_id": QUANTUM_BADGE["ibm_job_id"],
@@ -119,10 +165,6 @@ async def app_status():
 # ============================================================
 # MOUNT EXISTING ROUTERS (IF THEY EXIST)
 # ============================================================
-# Attempt to mount the routers from app/api/routes/
-# If the imports fail (e.g., missing files), the app still runs
-# with the quantum endpoints.
-
 try:
     from app.api.routes import auth, incidents, guardians, alerts, chat
     app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
@@ -133,7 +175,7 @@ try:
     print("[PELO] ✅ Mounted existing routers (auth, incidents, guardians, alerts, chat)")
 except Exception as e:
     print(f"[PELO] ⚠️ Could not mount existing routers: {e}")
-    print("[PELO] The quantum endpoints are still available.")
+    print("[PELO] The quantum and attestation endpoints are still available.")
 
 # ============================================================
 # RUN
