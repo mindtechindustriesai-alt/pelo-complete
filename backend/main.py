@@ -8,10 +8,9 @@ import os
 import hashlib
 import json
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
 import uvicorn
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
@@ -36,38 +35,50 @@ QUANTUM_BADGE = {
 }
 
 # ============================================================
-# FIREBASE INITIALIZATION
+# FIREBASE INITIALIZATION (Render Secret File)
 # ============================================================
-# Note: In production, use environment variables for credentials.
-# For this deployment, we use the service account JSON from env.
 try:
-    firebase_cred_json = os.getenv("FIREBASE_SERVICE_ACCOUNT")
-    if firebase_cred_json:
-        cred_dict = json.loads(firebase_cred_json)
-        cred = credentials.Certificate(cred_dict)
+    cred_path = "/etc/secrets/firebase-service-account.json"
+    if os.path.exists(cred_path):
+        cred = credentials.Certificate(cred_path)
         firebase_admin.initialize_app(cred)
+        print("[PELO] ✅ Firebase Admin initialized from secret file.")
     else:
-        # Fallback for local development (uses default credentials)
+        # Fallback for local development
         firebase_admin.initialize_app()
+        print("[PELO] ⚠️ Using default Firebase credentials (local dev).")
     db = firestore.client()
-    print("[PELO] ✅ Firebase Admin initialized.")
 except Exception as e:
-    print(f"[PELO] ⚠️ Firebase Admin not initialized: {e}")
+    print(f"[PELO] ❌ Firebase Admin failed to initialize: {e}")
     db = None
 
 # ============================================================
-# RSA KEY PAIR GENERATION (For Signing)
+# RSA KEY PAIR GENERATION / LOADING
 # ============================================================
-# In production, load these from environment variables.
-# For this deployment, we generate a fresh pair on startup.
-private_key = rsa.generate_private_key(
-    public_exponent=65537,
-    key_size=2048,
-    backend=default_backend()
-)
-public_key = private_key.public_key()
+# In production, we load the key from a secret file so signatures 
+# survive server restarts. If it doesn't exist, we generate it once.
+KEY_PATH = "/etc/secrets/private_key.pem"
 
-# Serialize public key for the endpoint
+if os.path.exists(KEY_PATH):
+    with open(KEY_PATH, "rb") as key_file:
+        private_key = serialization.load_pem_private_key(
+            key_file.read(),
+            password=None,
+            backend=default_backend()
+        )
+    print("[PELO] ✅ Private key loaded from secret file.")
+else:
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+        backend=default_backend()
+    )
+    print("[PELO] ⚠️ Generated new RSA key pair. Save this key to avoid invalidating signatures on restart.")
+    # Note: In a true production environment, you would save this to the secret file.
+    # Since Render's filesystem is ephemeral, the best practice is to generate the key 
+    # locally and upload it as a Secret File.
+
+public_key = private_key.public_key()
 public_key_pem = public_key.public_bytes(
     encoding=serialization.Encoding.PEM,
     format=serialization.PublicFormat.SubjectPublicKeyInfo
@@ -79,7 +90,7 @@ public_key_pem = public_key.public_bytes(
 app = FastAPI(
     title="PELO — Community Safety & Waste Management",
     description="Quantum-verified safety and waste intelligence platform",
-    version="1.0.2",
+    version="1.0.3",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -103,9 +114,6 @@ class CertificateIssueRequest(BaseModel):
     oil_volume: float
     timestamp: str
 
-class CertificateVerifyRequest(BaseModel):
-    certificate_hash: str
-
 # ============================================================
 # ROOT & HEALTH
 # ============================================================
@@ -113,7 +121,7 @@ class CertificateVerifyRequest(BaseModel):
 async def root():
     return {
         "service": "PELO",
-        "version": "1.0.2",
+        "version": "1.0.3",
         "status": "operational",
         "quantum_badge": QUANTUM_BADGE["text"],
         "patent": QUANTUM_BADGE["patent"],
@@ -123,7 +131,7 @@ async def root():
             "/api/quantum/status",
             "/api/v1/verify/chsh",
             "/api/v1/issue/certificate",
-            "/api/v1/verify/certificate",
+            "/api/v1/verify/certificate/{hash}",
             "/api/v1/public-key",
             "/api/v1/apps/pelo/status"
         ]
@@ -157,7 +165,7 @@ async def app_status():
     return {
         "app": "pelo",
         "status": "operational",
-        "version": "1.0.2",
+        "version": "1.0.3",
         "quantum_badge": f"CHSH S={QUANTUM_BADGE['chsh_s']:.2f}",
         "patent": QUANTUM_BADGE["patent"],
         "ibm_job_id": QUANTUM_BADGE["ibm_job_id"],
@@ -169,14 +177,9 @@ async def app_status():
 # ============================================================
 @app.post("/api/v1/issue/certificate")
 async def issue_certificate(request: CertificateIssueRequest):
-    """
-    Generates a SHA-256 hash of the certificate data, signs it with the private key,
-    and saves the record to the Firestore ledger.
-    """
     if not db:
         raise HTTPException(status_code=500, detail="Database not initialized.")
 
-    # 1. Create the canonical payload
     certificate_data = {
         "entry_id": request.entry_id,
         "owner_name": request.owner_name,
@@ -187,11 +190,11 @@ async def issue_certificate(request: CertificateIssueRequest):
         "patent": QUANTUM_BADGE["patent"]
     }
 
-    # 2. Generate the SHA-256 hash
+    # Generate the SHA-256 hash
     data_string = json.dumps(certificate_data, sort_keys=True)
     hash_hex = hashlib.sha256(data_string.encode()).hexdigest()
 
-    # 3. Sign the hash with the private key
+    # Sign the hash
     signature = private_key.sign(
         hash_hex.encode(),
         padding.PSS(
@@ -202,7 +205,7 @@ async def issue_certificate(request: CertificateIssueRequest):
     )
     signature_hex = signature.hex()
 
-    # 4. Save to Firestore ledger
+    # Save to Firestore ledger
     try:
         db.collection("pelo_master_ledger").document(hash_hex).set({
             **certificate_data,
@@ -228,14 +231,9 @@ async def issue_certificate(request: CertificateIssueRequest):
 # ============================================================
 @app.get("/api/v1/verify/certificate/{certificate_hash}")
 async def verify_certificate(certificate_hash: str):
-    """
-    Looks up the hash in the Firestore ledger.
-    Returns 404 if the hash was never issued.
-    """
     if not db:
         raise HTTPException(status_code=500, detail="Database not initialized.")
 
-    # Validate hash format
     if len(certificate_hash) != 64:
         raise HTTPException(status_code=400, detail="Invalid SHA-256 hash format.")
 
@@ -275,28 +273,11 @@ async def verify_certificate(certificate_hash: str):
 # ============================================================
 @app.get("/api/v1/public-key")
 async def get_public_key():
-    """
-    Returns the public key used to verify certificate signatures.
-    """
     return {
         "public_key": public_key_pem,
         "algorithm": "RSA-PSS-SHA256",
         "note": "Use this key to verify signatures offline."
     }
-
-# ============================================================
-# MOUNT EXISTING ROUTERS (IF THEY EXIST)
-# ============================================================
-try:
-    from app.api.routes import auth, incidents, guardians, alerts, chat
-    app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
-    app.include_router(incidents.router, prefix="/api/incidents", tags=["incidents"])
-    app.include_router(guardians.router, prefix="/api/guardians", tags=["guardians"])
-    app.include_router(alerts.router, prefix="/api/alerts", tags=["alerts"])
-    app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
-    print("[PELO] ✅ Mounted existing routers.")
-except Exception as e:
-    print(f"[PELO] ⚠️ Could not mount routers: {e}")
 
 # ============================================================
 # RUN
