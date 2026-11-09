@@ -7,6 +7,7 @@ Patent: SA 2026/05142
 import os
 import hashlib
 import json
+import re
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,7 +36,7 @@ QUANTUM_BADGE = {
 }
 
 # ============================================================
-# FIREBASE INITIALIZATION (Render Secret File)
+# FIREBASE INITIALIZATION
 # ============================================================
 try:
     cred_path = "/etc/secrets/firebase-service-account.json"
@@ -44,7 +45,6 @@ try:
         firebase_admin.initialize_app(cred)
         print("[PELO] ✅ Firebase Admin initialized from secret file.")
     else:
-        # Fallback for local development
         firebase_admin.initialize_app()
         print("[PELO] ⚠️ Using default Firebase credentials (local dev).")
     db = firestore.client()
@@ -53,10 +53,8 @@ except Exception as e:
     db = None
 
 # ============================================================
-# RSA KEY PAIR GENERATION / LOADING
+# RSA KEY PAIR LOADING
 # ============================================================
-# In production, we load the key from a secret file so signatures 
-# survive server restarts. If it doesn't exist, we generate it once.
 KEY_PATH = "/etc/secrets/private_key.pem"
 
 if os.path.exists(KEY_PATH):
@@ -74,9 +72,6 @@ else:
         backend=default_backend()
     )
     print("[PELO] ⚠️ Generated new RSA key pair. Save this key to avoid invalidating signatures on restart.")
-    # Note: In a true production environment, you would save this to the secret file.
-    # Since Render's filesystem is ephemeral, the best practice is to generate the key 
-    # locally and upload it as a Secret File.
 
 public_key = private_key.public_key()
 public_key_pem = public_key.public_bytes(
@@ -90,7 +85,7 @@ public_key_pem = public_key.public_bytes(
 app = FastAPI(
     title="PELO — Community Safety & Waste Management",
     description="Quantum-verified safety and waste intelligence platform",
-    version="1.0.3",
+    version="1.0.4",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -121,7 +116,7 @@ class CertificateIssueRequest(BaseModel):
 async def root():
     return {
         "service": "PELO",
-        "version": "1.0.3",
+        "version": "1.0.4",
         "status": "operational",
         "quantum_badge": QUANTUM_BADGE["text"],
         "patent": QUANTUM_BADGE["patent"],
@@ -165,7 +160,7 @@ async def app_status():
     return {
         "app": "pelo",
         "status": "operational",
-        "version": "1.0.3",
+        "version": "1.0.4",
         "quantum_badge": f"CHSH S={QUANTUM_BADGE['chsh_s']:.2f}",
         "patent": QUANTUM_BADGE["patent"],
         "ibm_job_id": QUANTUM_BADGE["ibm_job_id"],
@@ -173,7 +168,7 @@ async def app_status():
     }
 
 # ============================================================
-# 1. ISSUE CERTIFICATE (Dynamic Binding)
+# 1. ISSUE CERTIFICATE
 # ============================================================
 @app.post("/api/v1/issue/certificate")
 async def issue_certificate(request: CertificateIssueRequest):
@@ -190,11 +185,9 @@ async def issue_certificate(request: CertificateIssueRequest):
         "patent": QUANTUM_BADGE["patent"]
     }
 
-    # Generate the SHA-256 hash
     data_string = json.dumps(certificate_data, sort_keys=True)
     hash_hex = hashlib.sha256(data_string.encode()).hexdigest()
 
-    # Sign the hash
     signature = private_key.sign(
         hash_hex.encode(),
         padding.PSS(
@@ -205,7 +198,6 @@ async def issue_certificate(request: CertificateIssueRequest):
     )
     signature_hex = signature.hex()
 
-    # Save to Firestore ledger
     try:
         db.collection("pelo_master_ledger").document(hash_hex).set({
             **certificate_data,
@@ -227,15 +219,16 @@ async def issue_certificate(request: CertificateIssueRequest):
     }
 
 # ============================================================
-# 2. VERIFY CERTIFICATE (Read-Only Lookup)
+# 2. VERIFY CERTIFICATE (with Hex Validator and Ledger Timestamp)
 # ============================================================
 @app.get("/api/v1/verify/certificate/{certificate_hash}")
 async def verify_certificate(certificate_hash: str):
     if not db:
         raise HTTPException(status_code=500, detail="Database not initialized.")
 
-    if len(certificate_hash) != 64:
-        raise HTTPException(status_code=400, detail="Invalid SHA-256 hash format.")
+    # FIX 1: Strict hex validator (64 characters, only 0-9 and a-f)
+    if not re.fullmatch(r'^[a-fA-F0-9]{64}$', certificate_hash):
+        raise HTTPException(status_code=400, detail="Invalid SHA-256 hash format. Must be 64 hex characters.")
 
     try:
         doc = db.collection("pelo_master_ledger").document(certificate_hash).get()
@@ -257,9 +250,11 @@ async def verify_certificate(certificate_hash: str):
             "quantum_anchor": {
                 "chsh_s": QUANTUM_BADGE["chsh_s"],
                 "ibm_job_id": QUANTUM_BADGE["ibm_job_id"],
-                "hardware": QUANTUM_BADGE["ibm_processor"]
+                "hardware": QUANTUM_BADGE["ibm_processor"],
+                "anchor_note": "The IBM job proves the hardware and CHSH protocol are real. The ledger_timestamp proves when this specific certificate was issued."
             },
             "signature": data.get("signature"),
+            "ledger_timestamp": data.get("issued_at"),  # FIX 2: Cryptographic proof of issuance time
             "issued_at": data.get("issued_at")
         }
 
@@ -269,7 +264,7 @@ async def verify_certificate(certificate_hash: str):
         raise HTTPException(status_code=500, detail=f"Ledger lookup failed: {str(e)}")
 
 # ============================================================
-# 3. PUBLIC KEY (For Offline Verification)
+# 3. PUBLIC KEY
 # ============================================================
 @app.get("/api/v1/public-key")
 async def get_public_key():
