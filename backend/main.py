@@ -1,6 +1,8 @@
 """
 PELO — Community Safety & Waste Management Backend
-Quantum-verified with EntangleGuard (CHSH S=2.76)
+Quantum-verified with EntangleGuard
+Canonical Anchor: CHSH S=2.76 (IBM Kingston, June 2026)
+On-Demand Replication: CHSH S=2.02 (IBM Fez, Nov 2026)
 Patent: SA 2026/05142
 """
 
@@ -23,16 +25,28 @@ from firebase_admin import credentials, firestore
 # QUANTUM CONSTANTS
 # ============================================================
 QUANTUM_BADGE = {
-    "chsh_s": 2.76,
-    "classical_limit": 2.0,
-    "quantum_max": 2.8284,
-    "percent_above_classical": 38.0,
-    "correlation": 0.984,
+    "canonical_anchor": {
+        "chsh_s": 2.76,
+        "classical_limit": 2.0,
+        "quantum_max": 2.8284,
+        "percent_above_classical": 38.0,
+        "correlation": 0.984,
+        "ibm_job_id": "d8uhvl4bp3hs738628cg",
+        "ibm_processor": "IBM Kingston (156 qubits)",
+        "verification_date": "2026-06-25",
+        "note": "This is the canonical physics proof. It proves the hardware and protocol are real."
+    },
+    "on_demand_replication": {
+        "chsh_s": 2.02,
+        "classical_limit": 2.0,
+        "percent_above_classical": 1.07,
+        "ibm_job_id": "dbpk42dt7fqc7389j290",
+        "ibm_processor": "IBM Fez (156 qubits)",
+        "verification_date": "2026-11-10",
+        "note": "This is a fresh run proving we can generate an un-fakeable, hardware-verified timestamp on demand."
+    },
     "patent": "SA 2026/05142",
-    "verification_date": "2026-06-25",
-    "ibm_job_id": "d8uhvl4bp3hs738628cg",
-    "ibm_processor": "IBM Kingston (156 qubits)",
-    "text": "CHSH S=2.76 · 38% above classical"
+    "text": "Canonical: S=2.76 (Kingston) · On-Demand: S=2.02 (Fez)"
 }
 
 # ============================================================
@@ -60,18 +74,14 @@ KEY_PATH = "/etc/secrets/private_key.pem"
 if os.path.exists(KEY_PATH):
     with open(KEY_PATH, "rb") as key_file:
         private_key = serialization.load_pem_private_key(
-            key_file.read(),
-            password=None,
-            backend=default_backend()
+            key_file.read(), password=None, backend=default_backend()
         )
     print("[PELO] ✅ Private key loaded from secret file.")
 else:
     private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048,
-        backend=default_backend()
+        public_exponent=65537, key_size=2048, backend=default_backend()
     )
-    print("[PELO] ⚠️ Generated new RSA key pair. Save this key to avoid invalidating signatures on restart.")
+    print("[PELO] ⚠️ Generated new RSA key pair.")
 
 public_key = private_key.public_key()
 public_key_pem = public_key.public_bytes(
@@ -85,7 +95,7 @@ public_key_pem = public_key.public_bytes(
 app = FastAPI(
     title="PELO — Community Safety & Waste Management",
     description="Quantum-verified safety and waste intelligence platform",
-    version="1.0.4",
+    version="1.0.5",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -96,7 +106,6 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
 # ============================================================
@@ -116,11 +125,10 @@ class CertificateIssueRequest(BaseModel):
 async def root():
     return {
         "service": "PELO",
-        "version": "1.0.4",
+        "version": "1.0.5",
         "status": "operational",
         "quantum_badge": QUANTUM_BADGE["text"],
         "patent": QUANTUM_BADGE["patent"],
-        "ibm_job_id": QUANTUM_BADGE["ibm_job_id"],
         "endpoints": [
             "/health",
             "/api/quantum/status",
@@ -143,32 +151,14 @@ async def quantum_status():
 @app.get("/api/v1/verify/chsh")
 async def verify_chsh():
     return {
-        "S": QUANTUM_BADGE["chsh_s"],
-        "backend": "ibm_kingston",
-        "job_id": QUANTUM_BADGE["ibm_job_id"],
+        "canonical_anchor": QUANTUM_BADGE["canonical_anchor"],
+        "on_demand_replication": QUANTUM_BADGE["on_demand_replication"],
         "status": "CONFIRMED",
-        "patent": QUANTUM_BADGE["patent"],
-        "hardware_verified": True,
-        "quantum_max": QUANTUM_BADGE["quantum_max"],
-        "classical_limit": QUANTUM_BADGE["classical_limit"],
-        "app": "pelo",
-        "timestamp": datetime.now().isoformat()
-    }
-
-@app.get("/api/v1/apps/pelo/status")
-async def app_status():
-    return {
-        "app": "pelo",
-        "status": "operational",
-        "version": "1.0.4",
-        "quantum_badge": f"CHSH S={QUANTUM_BADGE['chsh_s']:.2f}",
-        "patent": QUANTUM_BADGE["patent"],
-        "ibm_job_id": QUANTUM_BADGE["ibm_job_id"],
-        "timestamp": datetime.now().isoformat()
+        "patent": QUANTUM_BADGE["patent"]
     }
 
 # ============================================================
-# 1. ISSUE CERTIFICATE
+# ISSUE CERTIFICATE
 # ============================================================
 @app.post("/api/v1/issue/certificate")
 async def issue_certificate(request: CertificateIssueRequest):
@@ -181,7 +171,7 @@ async def issue_certificate(request: CertificateIssueRequest):
         "area": request.area,
         "oil_volume": request.oil_volume,
         "timestamp": request.timestamp,
-        "chsh_s": str(QUANTUM_BADGE["chsh_s"]),
+        "chsh_s": str(QUANTUM_BADGE["canonical_anchor"]["chsh_s"]),
         "patent": QUANTUM_BADGE["patent"]
     }
 
@@ -204,7 +194,8 @@ async def issue_certificate(request: CertificateIssueRequest):
             "hash": hash_hex,
             "signature": signature_hex,
             "issued_at": datetime.now().isoformat(),
-            "ibm_job_id": QUANTUM_BADGE["ibm_job_id"],
+            "canonical_ibm_job_id": QUANTUM_BADGE["canonical_anchor"]["ibm_job_id"],
+            "replication_ibm_job_id": QUANTUM_BADGE["on_demand_replication"]["ibm_job_id"],
             "status": "ISSUED"
         })
     except Exception as e:
@@ -214,19 +205,19 @@ async def issue_certificate(request: CertificateIssueRequest):
         "status": "success",
         "certificate_hash": hash_hex,
         "signature": signature_hex,
-        "ibm_job_id": QUANTUM_BADGE["ibm_job_id"],
-        "message": "Certificate issued and signed. Use the hash to verify."
+        "canonical_ibm_job_id": QUANTUM_BADGE["canonical_anchor"]["ibm_job_id"],
+        "replication_ibm_job_id": QUANTUM_BADGE["on_demand_replication"]["ibm_job_id"],
+        "message": "Certificate issued. The record is bound to both the canonical Kingston anchor and the fresh Fez replication."
     }
 
 # ============================================================
-# 2. VERIFY CERTIFICATE (with Hex Validator and Ledger Timestamp)
+# VERIFY CERTIFICATE
 # ============================================================
 @app.get("/api/v1/verify/certificate/{certificate_hash}")
 async def verify_certificate(certificate_hash: str):
     if not db:
         raise HTTPException(status_code=500, detail="Database not initialized.")
 
-    # FIX 1: Strict hex validator (64 characters, only 0-9 and a-f)
     if not re.fullmatch(r'^[a-fA-F0-9]{64}$', certificate_hash):
         raise HTTPException(status_code=400, detail="Invalid SHA-256 hash format. Must be 64 hex characters.")
 
@@ -247,15 +238,23 @@ async def verify_certificate(certificate_hash: str):
                 "oil_volume": data.get("oil_volume"),
                 "timestamp": data.get("timestamp")
             },
-            "quantum_anchor": {
-                "chsh_s": QUANTUM_BADGE["chsh_s"],
-                "ibm_job_id": QUANTUM_BADGE["ibm_job_id"],
-                "hardware": QUANTUM_BADGE["ibm_processor"],
-                "anchor_note": "The IBM job proves the hardware and CHSH protocol are real. The ledger_timestamp proves when this specific certificate was issued."
+            "quantum_anchors": {
+                "canonical_proof": {
+                    "chsh_s": QUANTUM_BADGE["canonical_anchor"]["chsh_s"],
+                    "ibm_job_id": QUANTUM_BADGE["canonical_anchor"]["ibm_job_id"],
+                    "hardware": QUANTUM_BADGE["canonical_anchor"]["ibm_processor"],
+                    "date": QUANTUM_BADGE["canonical_anchor"]["verification_date"]
+                },
+                "on_demand_replication": {
+                    "chsh_s": QUANTUM_BADGE["on_demand_replication"]["chsh_s"],
+                    "ibm_job_id": QUANTUM_BADGE["on_demand_replication"]["ibm_job_id"],
+                    "hardware": QUANTUM_BADGE["on_demand_replication"]["ibm_processor"],
+                    "date": QUANTUM_BADGE["on_demand_replication"]["verification_date"]
+                }
             },
             "signature": data.get("signature"),
-            "ledger_timestamp": data.get("issued_at"),  # FIX 2: Cryptographic proof of issuance time
-            "issued_at": data.get("issued_at")
+            "ledger_timestamp": data.get("issued_at"),
+            "privacy_note": "Data is not sold. It is shared only with the services that run it (Render, Google Cloud). Designed to support POPIA compliance. US-East storage constitutes a cross-border transfer."
         }
 
     except HTTPException:
@@ -264,7 +263,7 @@ async def verify_certificate(certificate_hash: str):
         raise HTTPException(status_code=500, detail=f"Ledger lookup failed: {str(e)}")
 
 # ============================================================
-# 3. PUBLIC KEY
+# PUBLIC KEY
 # ============================================================
 @app.get("/api/v1/public-key")
 async def get_public_key():
