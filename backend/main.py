@@ -50,38 +50,80 @@ QUANTUM_BADGE = {
 }
 
 # ============================================================
-# FIREBASE INITIALIZATION
+# FIREBASE INITIALIZATION (Bulletproof Path Check)
 # ============================================================
-try:
-    cred_path = "/etc/secrets/firebase-service-account.json"
-    if os.path.exists(cred_path):
-        cred = credentials.Certificate(cred_path)
+db = None
+firebase_ready = False
+
+# Try all possible locations Render might use for secret files
+possible_paths = [
+    "/etc/secrets/firebase-service-account.json",
+    "firebase-service-account.json",
+    "./firebase-service-account.json",
+    "/opt/render/project/src/firebase-service-account.json",
+    "/etc/secrets/firebase-service-account.json"
+]
+
+cred = None
+for path in possible_paths:
+    if os.path.exists(path):
+        try:
+            cred = credentials.Certificate(path)
+            print(f"[PELO] ✅ Firebase service account found at: {path}")
+            break
+        except Exception as e:
+            print(f"[PELO] ⚠️ Found {path} but failed to parse: {e}")
+
+if cred:
+    try:
         firebase_admin.initialize_app(cred)
-        print("[PELO] ✅ Firebase Admin initialized from secret file.")
-    else:
-        firebase_admin.initialize_app()
-        print("[PELO] ⚠️ Using default Firebase credentials (local dev).")
-    db = firestore.client()
-except Exception as e:
-    print(f"[PELO] ❌ Firebase Admin failed to initialize: {e}")
-    db = None
-
-# ============================================================
-# RSA KEY PAIR LOADING
-# ============================================================
-KEY_PATH = "/etc/secrets/private_key.pem"
-
-if os.path.exists(KEY_PATH):
-    with open(KEY_PATH, "rb") as key_file:
-        private_key = serialization.load_pem_private_key(
-            key_file.read(), password=None, backend=default_backend()
-        )
-    print("[PELO] ✅ Private key loaded from secret file.")
+        db = firestore.client()
+        firebase_ready = True
+        print("[PELO] ✅ Firebase Admin initialized successfully.")
+    except Exception as e:
+        print(f"[PELO] ❌ Firebase Admin initialization failed: {e}")
+        db = None
 else:
+    print("[PELO] ❌ No firebase-service-account.json found in any expected location.")
+    print("[PELO]    Checked: " + ", ".join(possible_paths))
+    # Fallback for local dev
+    try:
+        firebase_admin.initialize_app()
+        db = firestore.client()
+        firebase_ready = True
+        print("[PELO] ⚠️ Using default Firebase credentials (local dev mode).")
+    except Exception as e:
+        print(f"[PELO] ❌ Default Firebase init also failed: {e}")
+        db = None
+
+# ============================================================
+# RSA KEY PAIR LOADING (Bulletproof)
+# ============================================================
+private_key = None
+key_paths = [
+    "/etc/secrets/private_key.pem",
+    "private_key.pem",
+    "./private_key.pem",
+    "/opt/render/project/src/private_key.pem"
+]
+
+for path in key_paths:
+    if os.path.exists(path):
+        try:
+            with open(path, "rb") as key_file:
+                private_key = serialization.load_pem_private_key(
+                    key_file.read(), password=None, backend=default_backend()
+                )
+            print(f"[PELO] ✅ Private key loaded from: {path}")
+            break
+        except Exception as e:
+            print(f"[PELO] ⚠️ Found {path} but failed to load key: {e}")
+
+if not private_key:
     private_key = rsa.generate_private_key(
         public_exponent=65537, key_size=2048, backend=default_backend()
     )
-    print("[PELO] ⚠️ Generated new RSA key pair.")
+    print("[PELO] ⚠️ Generated new RSA key pair. Signatures will not survive a restart.")
 
 public_key = private_key.public_key()
 public_key_pem = public_key.public_bytes(
@@ -95,7 +137,7 @@ public_key_pem = public_key.public_bytes(
 app = FastAPI(
     title="PELO — Community Safety & Waste Management",
     description="Quantum-verified safety and waste intelligence platform",
-    version="1.0.5",
+    version="1.0.6",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -125,8 +167,9 @@ class CertificateIssueRequest(BaseModel):
 async def root():
     return {
         "service": "PELO",
-        "version": "1.0.5",
+        "version": "1.0.6",
         "status": "operational",
+        "database": "connected" if firebase_ready else "disconnected",
         "quantum_badge": QUANTUM_BADGE["text"],
         "patent": QUANTUM_BADGE["patent"],
         "endpoints": [
@@ -142,7 +185,11 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    return {
+        "status": "healthy",
+        "database": "connected" if firebase_ready else "disconnected",
+        "timestamp": datetime.now().isoformat()
+    }
 
 @app.get("/api/quantum/status")
 async def quantum_status():
@@ -163,7 +210,10 @@ async def verify_chsh():
 @app.post("/api/v1/issue/certificate")
 async def issue_certificate(request: CertificateIssueRequest):
     if not db:
-        raise HTTPException(status_code=500, detail="Database not initialized.")
+        raise HTTPException(
+            status_code=503, 
+            detail="Database not initialized. Check that firebase-service-account.json is present in Render Secret Files."
+        )
 
     certificate_data = {
         "entry_id": request.entry_id,
@@ -207,7 +257,7 @@ async def issue_certificate(request: CertificateIssueRequest):
         "signature": signature_hex,
         "canonical_ibm_job_id": QUANTUM_BADGE["canonical_anchor"]["ibm_job_id"],
         "replication_ibm_job_id": QUANTUM_BADGE["on_demand_replication"]["ibm_job_id"],
-        "message": "Certificate issued. The record is bound to both the canonical Kingston anchor and the fresh Fez replication."
+        "message": "Certificate issued. Bound to both the Kingston canonical anchor and the Fez replication."
     }
 
 # ============================================================
@@ -216,7 +266,10 @@ async def issue_certificate(request: CertificateIssueRequest):
 @app.get("/api/v1/verify/certificate/{certificate_hash}")
 async def verify_certificate(certificate_hash: str):
     if not db:
-        raise HTTPException(status_code=500, detail="Database not initialized.")
+        raise HTTPException(
+            status_code=503, 
+            detail="Database not initialized. Check that firebase-service-account.json is present in Render Secret Files."
+        )
 
     if not re.fullmatch(r'^[a-fA-F0-9]{64}$', certificate_hash):
         raise HTTPException(status_code=400, detail="Invalid SHA-256 hash format. Must be 64 hex characters.")
@@ -271,6 +324,21 @@ async def get_public_key():
         "public_key": public_key_pem,
         "algorithm": "RSA-PSS-SHA256",
         "note": "Use this key to verify signatures offline."
+    }
+
+# ============================================================
+# APP STATUS
+# ============================================================
+@app.get("/api/v1/apps/pelo/status")
+async def app_status():
+    return {
+        "app": "pelo",
+        "status": "operational",
+        "version": "1.0.6",
+        "database": "connected" if firebase_ready else "disconnected",
+        "quantum_badge": QUANTUM_BADGE["text"],
+        "patent": QUANTUM_BADGE["patent"],
+        "timestamp": datetime.now().isoformat()
     }
 
 # ============================================================
