@@ -34,7 +34,7 @@ QUANTUM_BADGE = {
         "ibm_job_id": "d8uhvl4bp3hs738628cg",
         "ibm_processor": "IBM Kingston (156 qubits)",
         "verification_date": "2026-06-25",
-        "note": "This is the canonical physics proof. It proves the hardware and protocol are real."
+        "note": "Canonical physics proof. CHSH S=2.76, p<0.001, IBM Kingston."
     },
     "on_demand_replication": {
         "chsh_s": 2.02,
@@ -43,7 +43,7 @@ QUANTUM_BADGE = {
         "ibm_job_id": "dbpk42dt7fqc7389j290",
         "ibm_processor": "IBM Fez (156 qubits)",
         "verification_date": "2026-11-10",
-        "note": "This is a fresh run proving we can generate an un-fakeable, hardware-verified timestamp on demand."
+        "note": "Reproducible execution test on IBM Fez. Confirms the API can generate a hardware-verified timestamp on demand. The canonical Bell violation remains the Kingston run (S=2.76, p<0.001)."
     },
     "patent": "SA 2026/05142",
     "text": "Canonical: S=2.76 (Kingston) · On-Demand: S=2.02 (Fez)"
@@ -55,13 +55,11 @@ QUANTUM_BADGE = {
 db = None
 firebase_ready = False
 
-# Try all possible locations Render might use for secret files
 possible_paths = [
     "/etc/secrets/firebase-service-account.json",
     "firebase-service-account.json",
     "./firebase-service-account.json",
     "/opt/render/project/src/firebase-service-account.json",
-    "/etc/secrets/firebase-service-account.json"
 ]
 
 cred = None
@@ -86,7 +84,6 @@ if cred:
 else:
     print("[PELO] ❌ No firebase-service-account.json found in any expected location.")
     print("[PELO]    Checked: " + ", ".join(possible_paths))
-    # Fallback for local dev
     try:
         firebase_admin.initialize_app()
         db = firestore.client()
@@ -137,7 +134,7 @@ public_key_pem = public_key.public_bytes(
 app = FastAPI(
     title="PELO — Community Safety & Waste Management",
     description="Quantum-verified safety and waste intelligence platform",
-    version="1.0.6",
+    version="1.0.7",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -167,7 +164,7 @@ class CertificateIssueRequest(BaseModel):
 async def root():
     return {
         "service": "PELO",
-        "version": "1.0.6",
+        "version": "1.0.7",
         "status": "operational",
         "database": "connected" if firebase_ready else "disconnected",
         "quantum_badge": QUANTUM_BADGE["text"],
@@ -178,6 +175,7 @@ async def root():
             "/api/v1/verify/chsh",
             "/api/v1/issue/certificate",
             "/api/v1/verify/certificate/{hash}",
+            "/api/v1/certificate/{hash}/payload",
             "/api/v1/public-key",
             "/api/v1/apps/pelo/status"
         ]
@@ -211,7 +209,7 @@ async def verify_chsh():
 async def issue_certificate(request: CertificateIssueRequest):
     if not db:
         raise HTTPException(
-            status_code=503, 
+            status_code=503,
             detail="Database not initialized. Check that firebase-service-account.json is present in Render Secret Files."
         )
 
@@ -261,13 +259,13 @@ async def issue_certificate(request: CertificateIssueRequest):
     }
 
 # ============================================================
-# VERIFY CERTIFICATE
+# VERIFY CERTIFICATE (Public — REDACTED)
 # ============================================================
 @app.get("/api/v1/verify/certificate/{certificate_hash}")
 async def verify_certificate(certificate_hash: str):
     if not db:
         raise HTTPException(
-            status_code=503, 
+            status_code=503,
             detail="Database not initialized. Check that firebase-service-account.json is present in Render Secret Files."
         )
 
@@ -276,17 +274,25 @@ async def verify_certificate(certificate_hash: str):
 
     try:
         doc = db.collection("pelo_master_ledger").document(certificate_hash).get()
-        
+
         if not doc.exists:
             raise HTTPException(status_code=404, detail="Certificate not found in ledger.")
 
         data = doc.to_dict()
+
+        # POPIA minimisation: redact the owner name in the public response
+        owner_name = data.get("owner_name", "")
+        if len(owner_name) > 3:
+            redacted_owner = owner_name[:3] + "***"
+        else:
+            redacted_owner = "***"
+
         return {
             "status": "success",
             "certificate_hash": certificate_hash,
             "record": {
                 "entry_id": data.get("entry_id"),
-                "owner_name": data.get("owner_name"),
+                "owner_name": redacted_owner,
                 "area": data.get("area"),
                 "oil_volume": data.get("oil_volume"),
                 "timestamp": data.get("timestamp")
@@ -307,13 +313,70 @@ async def verify_certificate(certificate_hash: str):
             },
             "signature": data.get("signature"),
             "ledger_timestamp": data.get("issued_at"),
-            "privacy_note": "Data is not sold. It is shared only with the services that run it (Render, Google Cloud). Designed to support POPIA compliance. US-East storage constitutes a cross-border transfer."
+            "privacy_note": "Data is not sold. It is shared only with the services that run it (Render, Google Cloud). Designed to support POPIA compliance. US-East storage constitutes a cross-border transfer. Owner name is redacted in the public response; full details are available only in the authenticated admin dashboard."
         }
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ledger lookup failed: {str(e)}")
+
+# ============================================================
+# CERTIFICATE PAYLOAD (For hash recomputation)
+# ============================================================
+@app.get("/api/v1/certificate/{certificate_hash}/payload")
+async def certificate_payload(certificate_hash: str):
+    """
+    Returns the exact JSON payload that was hashed to produce this certificate_hash.
+    The hash is SHA-256 over json.dumps(payload, sort_keys=True, separators=(',', ':')).
+    This allows any third party to recompute the hash and verify it matches the record.
+    """
+    if not db:
+        raise HTTPException(
+            status_code=503,
+            detail="Database not initialized. Check that firebase-service-account.json is present in Render Secret Files."
+        )
+
+    if not re.fullmatch(r'^[a-fA-F0-9]{64}$', certificate_hash):
+        raise HTTPException(status_code=400, detail="Invalid SHA-256 hash format. Must be 64 hex characters.")
+
+    try:
+        doc = db.collection("pelo_master_ledger").document(certificate_hash).get()
+
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="Certificate not found in ledger.")
+
+        data = doc.to_dict()
+
+        payload = {
+            "entry_id": data.get("entry_id"),
+            "owner_name": data.get("owner_name"),
+            "area": data.get("area"),
+            "oil_volume": data.get("oil_volume"),
+            "timestamp": data.get("timestamp"),
+            "chsh_s": data.get("chsh_s"),
+            "patent": data.get("patent")
+        }
+
+        canonical_string = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        recomputed_hash = hashlib.sha256(canonical_string.encode()).hexdigest()
+
+        return {
+            "status": "success",
+            "certificate_hash": certificate_hash,
+            "payload": payload,
+            "canonical_serialisation": canonical_string,
+            "recomputed_hash": recomputed_hash,
+            "hash_matches": recomputed_hash == certificate_hash,
+            "hash_algorithm": "SHA-256",
+            "serialisation_rule": "json.dumps(payload, sort_keys=True, separators=(',', ':'))",
+            "note": "The certificate signature is RSA-PSS-SHA256 over the hex digest of the canonical serialisation above. Use /api/v1/public-key to verify offline."
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Payload reconstruction failed: {str(e)}")
 
 # ============================================================
 # PUBLIC KEY
@@ -334,7 +397,7 @@ async def app_status():
     return {
         "app": "pelo",
         "status": "operational",
-        "version": "1.0.6",
+        "version": "1.0.7",
         "database": "connected" if firebase_ready else "disconnected",
         "quantum_badge": QUANTUM_BADGE["text"],
         "patent": QUANTUM_BADGE["patent"],
