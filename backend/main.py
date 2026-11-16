@@ -134,7 +134,7 @@ public_key_pem = public_key.public_bytes(
 app = FastAPI(
     title="PELO — Community Safety & Waste Management",
     description="Quantum-verified safety and waste intelligence platform",
-    version="1.0.7",
+    version="1.0.8",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -164,7 +164,7 @@ class CertificateIssueRequest(BaseModel):
 async def root():
     return {
         "service": "PELO",
-        "version": "1.0.7",
+        "version": "1.0.8",
         "status": "operational",
         "database": "connected" if firebase_ready else "disconnected",
         "quantum_badge": QUANTUM_BADGE["text"],
@@ -223,6 +223,7 @@ async def issue_certificate(request: CertificateIssueRequest):
         "patent": QUANTUM_BADGE["patent"]
     }
 
+    # CANONICAL SERIALISATION — DO NOT CHANGE THIS
     data_string = json.dumps(certificate_data, sort_keys=True)
     hash_hex = hashlib.sha256(data_string.encode()).hexdigest()
 
@@ -328,7 +329,7 @@ async def verify_certificate(certificate_hash: str):
 async def certificate_payload(certificate_hash: str):
     """
     Returns the exact JSON payload that was hashed to produce this certificate_hash.
-    The hash is SHA-256 over json.dumps(payload, sort_keys=True, separators=(',', ':')).
+    The hash is SHA-256 over json.dumps(payload, sort_keys=True).
     This allows any third party to recompute the hash and verify it matches the record.
     """
     if not db:
@@ -358,7 +359,8 @@ async def certificate_payload(certificate_hash: str):
             "patent": data.get("patent")
         }
 
-        canonical_string = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        # SAME SERIALISATION AS THE ISSUE ENDPOINT
+        canonical_string = json.dumps(payload, sort_keys=True)
         recomputed_hash = hashlib.sha256(canonical_string.encode()).hexdigest()
 
         return {
@@ -369,7 +371,7 @@ async def certificate_payload(certificate_hash: str):
             "recomputed_hash": recomputed_hash,
             "hash_matches": recomputed_hash == certificate_hash,
             "hash_algorithm": "SHA-256",
-            "serialisation_rule": "json.dumps(payload, sort_keys=True, separators=(',', ':'))",
+            "serialisation_rule": "json.dumps(payload, sort_keys=True)",
             "note": "The certificate signature is RSA-PSS-SHA256 over the hex digest of the canonical serialisation above. Use /api/v1/public-key to verify offline."
         }
 
@@ -397,7 +399,7 @@ async def app_status():
     return {
         "app": "pelo",
         "status": "operational",
-        "version": "1.0.7",
+        "version": "1.0.8",
         "database": "connected" if firebase_ready else "disconnected",
         "quantum_badge": QUANTUM_BADGE["text"],
         "patent": QUANTUM_BADGE["patent"],
